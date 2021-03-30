@@ -2,25 +2,69 @@
 
 #include "alloc-util.h"
 #include "fd-util.h"
+#include "netlink-util.h"
 #include "network-util.h"
 #include "string-table.h"
 #include "strv.h"
 
 bool network_is_online(void) {
-        _cleanup_free_ char *carrier_state = NULL, *addr_state = NULL;
-        int r;
+        _cleanup_free_ int *ifindexes = NULL;
+        int c, r;
 
-        r = sd_network_get_carrier_state(&carrier_state);
-        if (r < 0) /* if we don't know anything, we consider the system online */
-                return true;
+        /*
+         * Return true if any RequiredForOnline= link is its required state. If that
+         * can't be determined, fall back to a reasonable check on the global state.
+         */
+        c = rtnl_get_ifindexes(NULL, &ifindexes);
+        if (c > 0) {
+                for (int i = 0; i < c; i++) {
+                        _cleanup_free_ char *operstate = NULL, *required_operstate = NULL;
+                        LinkOperationalStateRange required;
+                        LinkOperationalState state;
+                        int ifindex = ifindexes[i];
 
-        r = sd_network_get_address_state(&addr_state);
-        if (r < 0) /* if we don't know anything, we consider the system online */
-                return true;
+                        /* ignore links that are not required for online */
+                        r = sd_network_link_get_required_for_online(ifindex);
+                        if (r <= 0)
+                                continue;
 
-        if (STR_IN_SET(carrier_state, "degraded-carrier", "carrier") &&
-            STR_IN_SET(addr_state, "routable", "degraded"))
-                return true;
+                        r = sd_network_link_get_required_operstate_for_online(ifindex, &required_operstate);
+                        if (r < 0)
+                                continue;
+                        else if (isempty(required_operstate))
+                                required = LINK_OPERSTATE_RANGE_DEFAULT;
+                        else {
+                                r = parse_operational_state_range(required_operstate, &required);
+                                if (r < 0)
+                                        continue;
+                        }
+
+                        r = sd_network_link_get_operational_state(ifindex, &operstate);
+                        if (r < 0)
+                                continue;
+
+                        state = link_operstate_from_string(operstate);
+                        if (state < 0)
+                                continue;
+
+                        if (state >= required.min && state <= required.max)
+                                return true;
+                }
+        } else {
+                _cleanup_free_ char *carrier_state = NULL, *addr_state = NULL;
+
+                r = sd_network_get_carrier_state(&carrier_state);
+                if (r < 0) /* if we don't know anything, we consider the system online */
+                        return true;
+
+                r = sd_network_get_address_state(&addr_state);
+                if (r < 0) /* if we don't know anything, we consider the system online */
+                        return true;
+
+                if (STR_IN_SET(carrier_state, "degraded-carrier", "carrier") &&
+                    STR_IN_SET(addr_state, "routable", "degraded"))
+                        return true;
+        }
 
         return false;
 }

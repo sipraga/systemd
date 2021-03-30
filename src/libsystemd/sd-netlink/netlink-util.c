@@ -285,6 +285,64 @@ int rtnl_get_link_iftype(sd_netlink **rtnl, int ifindex, unsigned short *ret) {
         return sd_rtnl_message_link_get_type(reply, ret);
 }
 
+int rtnl_get_ifindexes(sd_netlink **rtnl, int **ret) {
+        _cleanup_(sd_netlink_unrefp) sd_netlink *our_rtnl = NULL;
+        _cleanup_(sd_netlink_message_unrefp) sd_netlink_message *message = NULL, *reply = NULL;
+        sd_netlink_message *m;
+        _cleanup_free_ int *ifis = NULL;
+        size_t allocated = 0, c = 0;
+        uint16_t type;
+        int ifindex;
+        int r;
+
+        if (!rtnl)
+                rtnl = &our_rtnl;
+        if (!*rtnl) {
+                r = sd_netlink_open(rtnl);
+                if (r < 0)
+                        return r;
+        }
+
+        r = sd_rtnl_message_new_link(*rtnl, &message, RTM_GETLINK, 0);
+        if (r < 0)
+                return r;
+
+        r = sd_netlink_message_request_dump(message, true);
+        if (r < 0)
+                return r;
+
+        r = sd_netlink_call(*rtnl, message, 0, &reply);
+        if (r < 0)
+                return r;
+
+        for (m = reply; m; m = sd_netlink_message_next(m)) {
+                r = sd_netlink_message_get_type(m, &type);
+                if (r < 0)
+                        continue;
+
+                if (type != RTM_NEWLINK)
+                        continue;
+
+                r = sd_rtnl_message_link_get_ifindex(m, &ifindex);
+                if (r < 0)
+                        continue;
+                else if (ifindex <= 0)
+                        continue;
+
+                if (!GREEDY_REALLOC(ifis, allocated, c + 2))
+                        return -ENOMEM;
+
+                ifis[c++] = ifindex;
+        }
+
+        if (ifis)
+                ifis[c] = 0;
+
+        *ret = TAKE_PTR(ifis);
+
+        return c;
+}
+
 int rtnl_message_new_synthetic_error(sd_netlink *rtnl, int error, uint32_t serial, sd_netlink_message **ret) {
         struct nlmsgerr *err;
         int r;
